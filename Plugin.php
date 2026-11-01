@@ -15,12 +15,12 @@ require_once __DIR__ . '/Render.php';
  * @author xiguacaizimi
  * @author_email xiguacaizimi@163.com
  * @link https://www.xiguacaizimi.top
- * @version 1.3.0
+ * @version 1.3.1
  * @since 1.2.0
  */
 class YouQuan_Plugin implements Typecho_Plugin_Interface
 {
-    const VERSION = '1.3.0';
+    const VERSION = '1.3.1';
 
     /** @var int 正在由本插件接管渲染的页面 cid（0 表示未接管） */
     private static $ownPageCid = 0;
@@ -52,11 +52,7 @@ class YouQuan_Plugin implements Typecho_Plugin_Interface
 
         // 后台入口：控制台 → 有圈
         //（1.3 起 panelTable 也改成 JSON，Helper 内部已处理；这里再包一层防止面板注册失败影响启用）
-        try {
-            Helper::addPanel(1, 'YouQuan/Manage.php', _t('有圈'), _t('管理博友圈订阅与文章'), 'administrator');
-        } catch (Exception $e) {
-            // 面板注册失败不阻断启用流程
-        }
+        self::ensurePanel();
 
         return _t('有圈已启用，页面与导航图标已自动创建，请进入「控制台 → 有圈」添加圈友或从友链一键导入。');
     }
@@ -66,11 +62,7 @@ class YouQuan_Plugin implements Typecho_Plugin_Interface
      */
     public static function deactivate()
     {
-        try {
-            Helper::removePanel(1, 'YouQuan/Manage.php');
-        } catch (Exception $e) {
-            // 面板本就不存在时忽略
-        }
+        self::removePanelEntry();
         return _t('有圈已停用，订阅与文章数据均已保留。');
     }
 
@@ -239,6 +231,160 @@ class YouQuan_Plugin implements Typecho_Plugin_Interface
 
         // 短链接：/youquan → 有圈页面
         Typecho_Plugin::factory('index.php')->begin = array('YouQuan_Plugin', 'route');
+    }
+
+    /**
+     * 检查后台菜单里是否还有「有圈」这个面板。
+     *
+     * 两个坑：
+     * 1. Typecho 的后台菜单规则是 parent[K] 对应 child[10 + K]，
+     *    只调 addPanel() 而不调 addMenu() 的话，面板挂错了位置，菜单里根本不会出现；
+     * 2. 有别的插件（尤其是老版本的图库插件）会用 unserialize() 读 panelTable，
+     *    在 Typecho 1.3 上读出 false 后把整张菜单表覆盖成只剩自己一项，
+     *    于是「有圈」的菜单入口被删掉，后台面板就进不去了。
+     *
+     * @return bool
+     */
+    public static function panelRegistered()
+    {
+        $table = YouQuan_Config::readOptionArray('panelTable');
+        $url = 'extending.php?panel=' . urlencode('YouQuan/Manage.php');
+
+        $menus = isset($table['parent']) && is_array($table['parent']) ? $table['parent'] : array();
+        $children = isset($table['child']) && is_array($table['child']) ? $table['child'] : array();
+        $files = isset($table['file']) && is_array($table['file']) ? $table['file'] : array();
+
+        $file = urlencode('YouQuan/Manage.php');
+        if (!in_array($file, $files, true)) return false;
+
+        foreach ($menus as $key => $name) {
+            if ((string) $name !== '有圈') continue;
+
+            $childKey = 10 + $key;
+            if (!isset($children[$childKey])) return false;
+
+            foreach ((array) $children[$childKey] as $item) {
+                if (isset($item[2]) && $item[2] === $url) return true;
+            }
+        }
+
+        return false;
+    }
+
+    /**
+     * 补回后台菜单入口（幂等）。
+     *
+     * addMenu() / addPanel() 在 Typecho 1.2 与 1.3 上签名一致，
+     * 存储格式的差异由它们内部自己处理，这里不用操心。
+     *
+     * @return bool
+     */
+    public static function ensurePanel()
+    {
+        if (self::panelRegistered()) return true;
+
+        try {
+            $table = YouQuan_Config::readOptionArray('panelTable');
+            $menus = isset($table['parent']) && is_array($table['parent']) ? $table['parent'] : array();
+
+            $parentKey = null;
+            foreach ($menus as $key => $name) {
+                if ((string) $name === '有圈') { $parentKey = $key; break; }
+            }
+
+            if ($parentKey === null) {
+                // addMenu() 返回「父菜单下标 + 10」，正好是 addPanel() 要用的子菜单下标
+                $index = Helper::addMenu(_t('有圈'));
+            } else {
+                $index = 10 + $parentKey;
+            }
+
+            Helper::addPanel($index, 'YouQuan/Manage.php', _t('有圈'), _t('管理博友圈订阅与文章'), 'administrator');
+
+            return true;
+        } catch (Exception $e) {
+            return false;
+        } catch (Throwable $e) {
+            return false;
+        }
+    }
+
+    /**
+     * 移除后台菜单入口（停用插件时调用）。
+     * @return void
+     */
+    public static function removePanelEntry()
+    {
+        try {
+            $table = YouQuan_Config::readOptionArray('panelTable');
+            $file = urlencode('YouQuan/Manage.php');
+            $url = 'extending.php?panel=' . $file;
+
+            $menus = isset($table['parent']) && is_array($table['parent']) ? $table['parent'] : array();
+            $children = isset($table['child']) && is_array($table['child']) ? $table['child'] : array();
+            $files = isset($table['file']) && is_array($table['file']) ? $table['file'] : array();
+
+            foreach ($menus as $key => $name) {
+                if ((string) $name !== '有圈') continue;
+
+                $childKey = 10 + $key;
+                if (isset($children[$childKey])) {
+                    foreach ((array) $children[$childKey] as $i => $item) {
+                        if (isset($item[2]) && $item[2] === $url) unset($children[$childKey][$i]);
+                    }
+                    if (!$children[$childKey]) unset($children[$childKey]);
+                }
+
+                // 这个父菜单下再没有别的子项了，父菜单也一并去掉
+                if (!isset($children[$childKey])) unset($menus[$key]);
+            }
+
+            $pos = array_search($file, $files, true);
+            if ($pos !== false) unset($files[$pos]);
+
+            $table['parent'] = $menus;
+            $table['child'] = $children;
+            $table['file'] = array_values($files);
+
+            YouQuan_Config::writeOptionArray('panelTable', $table);
+        } catch (Exception $e) {
+            // 停用流程不因菜单清理失败而中断
+        } catch (Throwable $e) {
+        }
+    }
+
+    /**
+     * 环境自检：把影响前台显示的几项状态一次性列出来。
+     *
+     * @return array
+     */
+    public static function diagnostics()
+    {
+        $items = array();
+
+        $version = '';
+        if (class_exists('\Typecho\Common') && defined('\Typecho\Common::VERSION')) {
+            $version = (string) constant('\Typecho\Common::VERSION');
+        }
+        $items[] = array('Typecho 版本', $version !== '' ? $version : '未知', $version !== '');
+
+        $hooks = self::hooksRegistered();
+        $items[] = array('插件钩子', $hooks ? '已注册' : '未注册（前台不会接管页面）', $hooks);
+
+        $panel = self::panelRegistered();
+        $items[] = array('后台菜单', $panel ? '正常' : '缺失（用下面的按钮补回）', $panel);
+
+        $page = self::resolvePage();
+        $items[] = array('承载页面', $page ? $page['title'] . '（/'.$page['slug'].'）' : '未绑定', (bool) $page);
+
+        $fields = $page ? YouQuan_Feed::pageFields((int) $page['cid']) : array();
+        $hasIcon = !empty($fields['iconPage']);
+        $items[] = array('导航图标', $hasIcon ? '已写入' : '缺失', $hasIcon);
+
+        $css = is_file(__DIR__ . '/assets/front.css');
+        $items[] = array('前台样式文件', $css ? '正常' : '缺失（front.css 未上传）', $css);
+
+        return $items;
     }
 
     /**

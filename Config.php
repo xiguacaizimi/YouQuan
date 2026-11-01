@@ -220,6 +220,55 @@ class YouQuan_Config
     }
 
     /**
+     * 读取 options 表里的数组字段（兼容 serialize 与 JSON）。
+     *
+     * @param string $name 字段名，如 panelTable
+     * @return array
+     */
+    public static function readOptionArray($name)
+    {
+        try {
+            $db = Typecho_Db::get();
+            $row = $db->fetchRow($db->select('value')->from('table.options')->where('name = ?', $name)->limit(1));
+            $raw = (string) ($row['value'] ?? '');
+            if ($raw === '') return array();
+
+            $isSerialized = strpos($raw, 'a:') === 0 || $raw === 'b:0;';
+            $data = $isSerialized ? @unserialize($raw) : json_decode($raw, true);
+
+            return is_array($data) ? $data : array();
+        } catch (Exception $e) {
+            return array();
+        }
+    }
+
+    /**
+     * 写回 options 表里的数组字段（按当前 Typecho 版本选择格式）。
+     *
+     * @param string $name
+     * @param array  $data
+     * @return bool
+     */
+    public static function writeOptionArray($name, array $data)
+    {
+        try {
+            $db = Typecho_Db::get();
+            $raw = self::encodeOptions($data, self::optionsEncoding());
+
+            $row = $db->fetchRow($db->select('name')->from('table.options')->where('name = ?', $name)->limit(1));
+            if ($row) {
+                $db->query($db->update('table.options')->rows(array('value' => $raw))->where('name = ?', $name));
+            } else {
+                $db->query($db->insert('table.options')->rows(array('name' => $name, 'user' => 0, 'value' => $raw)));
+            }
+
+            return true;
+        } catch (Exception $e) {
+            return false;
+        }
+    }
+
+    /**
      * Typecho 当前的 options 表用哪种格式存数组。
      *
      * Typecho 1.3 起把 plugin:xxx、theme:xxx、plugins 等字段从 PHP serialize() 改成 JSON，

@@ -532,6 +532,14 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             yq_go(array('tab' => 'feeds'));
             break;
 
+        case 'repair_menu':
+            $ok = YouQuan_Plugin::ensurePanel();
+            yq_flash($ok
+                ? '后台菜单入口已补回，请刷新控制台页面'
+                : '补回失败，请检查数据库写入权限', $ok ? 'success' : 'error');
+            yq_go(array('tab' => 'settings'));
+            break;
+
         case 'reregister_hooks':
             if (YouQuan_Plugin::reregisterHooks()) {
                 yq_flash('钩子已重新写入，前台现在应该已生效（如仍无效请刷新页面缓存）');
@@ -1130,6 +1138,21 @@ $pluginUrl = $options->pluginUrl . '/YouQuan';
                             <p class="yq-tip">Typecho 只在启用插件的那一刻记录钩子，覆盖升级文件不会自动补上。
                                 点「修复钩子」即可，也可以到「控制台 → 插件」把有圈停用再启用一次。</p>
                         <?php endif; ?>
+
+                        <!-- 环境自检 -->
+                        <div class="yq-diag">
+                            <?php foreach (YouQuan_Plugin::diagnostics() as $diagItem): ?>
+                                <div class="yq-diag-row<?php echo $diagItem[2] ? '' : ' is-bad'; ?>">
+                                    <span class="yq-diag-label"><?php echo yq_h($diagItem[0]); ?></span>
+                                    <span class="yq-diag-value"><?php echo yq_h($diagItem[1]); ?></span>
+                                </div>
+                            <?php endforeach; ?>
+                        </div>
+                        <form method="post" action="<?php echo yq_h(yq_url(array('tab' => 'settings'))); ?>" class="yq-inline-form">
+                            <input type="hidden" name="_" value="<?php echo yq_h(yq_token()); ?>">
+                            <input type="hidden" name="action" value="repair_menu">
+                            <button class="btn btn-s" type="submit" title="补回被其它插件覆盖掉的后台菜单入口">修复后台菜单</button>
+                        </form>
 
                         <div class="yq-links">
                             <div class="yq-link-row">

@@ -1064,3 +1064,45 @@ select.yq-input {
     line-height: 1.6;
     vertical-align: middle;
 }
+
+/* ---------------- 环境自检 ---------------- */
+.yq-diag {
+    margin: 14px 0 10px;
+    border: 1px solid #F0F0EC;
+    border-radius: 2px;
+    background: #FCFCFB;
+}
+
+.yq-diag-row {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 16px;
+    padding: 7px 12px;
+    border-bottom: 1px solid #F0F0EC;
+    font-size: 13px;
+}
+
+.yq-diag-row:last-child {
+    border-bottom: 0;
+}
+
+.yq-diag-label {
+    flex: 0 0 auto;
+    color: #6E6E68;
+}
+
+.yq-diag-value {
+    flex: 1 1 auto;
+    text-align: right;
+    color: #212529;
+}
+
+.yq-diag-row.is-bad {
+    background: #FDF6F6;
+}
+
+.yq-diag-row.is-bad .yq-diag-value {
+    color: #C0392B;
+    font-weight: 600;
+}
