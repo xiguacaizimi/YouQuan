@@ -136,21 +136,8 @@ class YouQuan_Render
      */
     public static function page($archive)
     {
-        if (!is_object($archive)) return false;
-
-        $themeDir = '';
-        if (method_exists($archive, 'getThemeDir')) {
-            $themeDir = (string) $archive->getThemeDir();
-        }
-        if ($themeDir === '' && isset($archive->themeDir)) {
-            $themeDir = (string) $archive->themeDir;
-        }
+        $themeDir = self::themeDirFor($archive);
         if ($themeDir === '') return false;
-
-        $themeDir = rtrim($themeDir, '/\\') . '/';
-        foreach (array('template-parts/header.php', 'template-parts/footer.php') as $file) {
-            if (!is_file($themeDir . $file)) return false;
-        }
 
         $template = __DIR__ . '/templates/page.php';
         if (!is_file($template)) return false;
@@ -161,6 +148,36 @@ class YouQuan_Render
         $render->call($archive);
 
         return true;
+    }
+
+    /**
+     * 判断主题是否支持接管渲染，支持则返回主题目录（结尾带斜杠）。
+     *
+     * 只要主题有 template-parts/header.php 与 footer.php 就认为支持，
+     * 因为 templates/page.php 是对着这套片段写的。
+     *
+     * @param object $archive Widget\Archive
+     * @return string 空串表示不支持
+     */
+    public static function themeDirFor($archive)
+    {
+        if (!is_object($archive)) return '';
+
+        $themeDir = '';
+        if (method_exists($archive, 'getThemeDir')) {
+            $themeDir = (string) $archive->getThemeDir();
+        }
+        if ($themeDir === '' && isset($archive->themeDir)) {
+            $themeDir = (string) $archive->themeDir;
+        }
+        if ($themeDir === '') return '';
+
+        $themeDir = rtrim($themeDir, '/\\') . '/';
+        foreach (array('template-parts/header.php', 'template-parts/footer.php') as $file) {
+            if (!is_file($themeDir . $file)) return '';
+        }
+
+        return is_file(__DIR__ . '/templates/page.php') ? $themeDir : '';
     }
 
     /**

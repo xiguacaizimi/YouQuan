@@ -15,22 +15,31 @@ require_once __DIR__ . '/Render.php';
  * @author xiguacaizimi
  * @author_email xiguacaizimi@163.com
  * @link https://www.xiguacaizimi.top
- * @version 1.2.1
+ * @version 1.3.0
  * @since 1.2.0
  */
 class YouQuan_Plugin implements Typecho_Plugin_Interface
 {
-    const VERSION = '1.2.1';
+    const VERSION = '1.3.0';
 
     /** @var int 正在由本插件接管渲染的页面 cid（0 表示未接管） */
     private static $ownPageCid = 0;
+
+    /** @var bool 钩子是否已注册，避免重复注册 */
+    private static $booted = false;
 
     /**
      * 启用插件。
      */
     public static function activate()
     {
-        YouQuan_Feed::install();
+        try {
+            YouQuan_Feed::install();
+        } catch (Exception $e) {
+            // 建表失败不让启用流程中断（例如账号没有 DDL 权限），进面板可以重试
+        } catch (Throwable $e) {
+            // PHP 7+ 的非 Exception 错误同理
+        }
         // 给 Typecho 的设置页留一份同键名的配置行（否则打开设置页会 500）
         YouQuan_Config::syncTypechoRow();
 
@@ -217,16 +226,109 @@ class YouQuan_Plugin implements Typecho_Plugin_Interface
      */
     public static function boot()
     {
+        if (self::$booted) return;
+        self::$booted = true;
+
         // 短代码：没有走接管渲染时（非 ilogs 主题）依然可以用 [youquan] 嵌入
         Typecho_Plugin::factory('Widget_Abstract_Contents')->contentEx = array('YouQuan_Plugin', 'parseContent');
 
         // 独立页面接管：有圈页面不写短代码也能直接显示（对齐图库插件的做法）
+        // 两种写法在 Typecho 内部会归一化成同一个 handle，这里保留双写以兼容 1.1
         Typecho_Plugin::factory('Widget\Archive')->beforeRender = array('YouQuan_Plugin', 'beforeRender');
-        // 兼容 Typecho 1.1 的下划线类名
         Typecho_Plugin::factory('Widget_Archive')->beforeRender = array('YouQuan_Plugin', 'beforeRender');
 
         // 短链接：/youquan → 有圈页面
         Typecho_Plugin::factory('index.php')->begin = array('YouQuan_Plugin', 'route');
+    }
+
+    /**
+     * 检查钩子是否已经写进 options.plugins。
+     *
+     * Typecho 的插件钩子只在「启用那一刻」持久化，运行时并不会加载插件文件；
+     * 所以如果升级文件后没有重新启用，新钩子就不会生效 —— 这里用来诊断。
+     *
+     * @return bool
+     */
+    public static function hooksRegistered()
+    {
+        try {
+            $export = Typecho_Plugin::export();
+        } catch (Exception $e) {
+            return false;
+        } catch (Throwable $e) {
+            return false;
+        }
+
+        if (!isset($export['handles']) || !is_array($export['handles'])) return false;
+
+        $need = array('Widget_Archive:beforeRender', 'Widget_Abstract_Contents:contentEx');
+        foreach ($need as $key) {
+            if (empty($export['handles'][$key])) return false;
+        }
+
+        return true;
+    }
+
+    /**
+     * 重新把钩子写入 options.plugins（不动数据、不需要停用再启用）。
+     *
+     * 用于「升级插件文件后钩子没生效」的情况：Typecho 只在启用时记录钩子，
+     * 覆盖升级不会自动补上新增的 beforeRender。
+     *
+     * @return bool
+     */
+    public static function reregisterHooks()
+    {
+        try {
+            // 插件文件已被加载过（调用本方法即意味着已加载），钩子此时已注册在内存里
+            self::boot();
+
+            if (!method_exists('Typecho_Plugin', 'export')) return false;
+
+            $export = Typecho_Plugin::export();
+            if (!isset($export['handles']) || !is_array($export['handles'])) $export['handles'] = array();
+            if (!isset($export['activated']) || !is_array($export['activated'])) $export['activated'] = array();
+
+            // 精确写出本插件的三个钩子，不把别的插件的临时句柄带进来
+            $ours = array(
+                'Widget_Archive:beforeRender' => array(array('YouQuan_Plugin', 'beforeRender')),
+                'Widget_Abstract_Contents:contentEx' => array(array('YouQuan_Plugin', 'parseContent')),
+                'index.php:begin' => array(array('YouQuan_Plugin', 'route')),
+            );
+
+            foreach ($ours as $component => $callbacks) {
+                if (!isset($export['handles'][$component]) || !is_array($export['handles'][$component])) {
+                    $export['handles'][$component] = array();
+                }
+                $export['handles'][$component]['0'] = $callbacks[0];
+                ksort($export['handles'][$component], SORT_NUMERIC);
+            }
+
+            $export['activated']['YouQuan'] = array('handles' => $ours);
+
+            $db = Typecho_Db::get();
+            $name = 'plugins';
+            $row = $db->fetchRow($db->select('value')->from('table.options')->where('name = ?', $name));
+
+            $encoding = YouQuan_Config::optionsEncoding();
+            if ($row) {
+                $stored = trim((string) $row['value']);
+                if ($stored !== '' && ($stored[0] === '{' || $stored[0] === '[')) $encoding = 'json';
+            }
+
+            $value = YouQuan_Config::encodeOptions($export, $encoding);
+            if ($row) {
+                $db->query($db->update('table.options')->rows(array('value' => $value))->where('name = ?', $name));
+            } else {
+                $db->query($db->insert('table.options')->rows(array('name' => $name, 'user' => 0, 'value' => $value)));
+            }
+
+            return true;
+        } catch (Exception $e) {
+            return false;
+        } catch (Throwable $e) {
+            return false;
+        }
     }
 
     /**
@@ -241,13 +343,9 @@ class YouQuan_Plugin implements Typecho_Plugin_Interface
      */
     public static function beforeRender($archive)
     {
-        if (!is_object($archive) || !method_exists($archive, 'is')) return;
+        if (!is_object($archive)) return;
 
-        try {
-            if (!$archive->is('page')) return;
-        } catch (Exception $e) {
-            return;
-        }
+        if (!self::isPageArchive($archive)) return;
 
         $page = self::resolvePage();
         if (!$page) return;
@@ -289,13 +387,11 @@ class YouQuan_Plugin implements Typecho_Plugin_Interface
             return $content;
         }
 
-        // 这一页正由 templates/page.php 自己输出正文，主题只是顺手读了一下 content
-        // （多见于生成 <meta name="description">）。这里返回空串，避免重复渲染
-        // 与摘要被 CSS 文本污染。
-        if (self::$ownPageCid > 0) {
-            if (!is_object($archive) || !isset($archive->cid) || (int) $archive->cid === self::$ownPageCid) {
-                return '';
-            }
+        // 这一页正由 templates/page.php 自己输出正文。
+        // 注意：Typecho 的 contentEx 在 Archive::execute() 阶段就会执行（早于 beforeRender），
+        // 所以不能只靠 $ownPageCid 判断，必须直接认「这是不是有圈承载页」。
+        if (self::isHostArchive($archive)) {
+            return '';
         }
 
         // Markdown 会把独占一行的短代码包成 <p><code>[youquan]</code></p>，
@@ -312,6 +408,67 @@ class YouQuan_Plugin implements Typecho_Plugin_Interface
         }, $content);
 
         return $content;
+    }
+
+    /**
+     * 判断归档是不是「页面」。
+     *
+     * 不能只看 is('page')：Typecho 的 Archive::is() 比的是 archiveType，
+     * 而 archiveType 要到 render 阶段才解析成 'page'，在 execute 阶段仍是 'index'。
+     * 所以优先看内容的 type 字段。
+     *
+     * @param mixed $archive
+     * @return bool
+     */
+    private static function isPageArchive($archive)
+    {
+        if (!is_object($archive)) return false;
+
+        if (isset($archive->type) && (string) $archive->type === 'page') return true;
+
+        if (method_exists($archive, 'is')) {
+            try {
+                if ($archive->is('page')) return true;
+            } catch (Exception $e) {
+                return false;
+            } catch (Throwable $e) {
+                return false;
+            }
+        }
+
+        return false;
+    }
+
+    /**
+     * 判断当前归档是不是「有圈承载页」。
+     *
+     * @param mixed $archive
+     * @return bool
+     */
+    private static function isHostArchive($archive)
+    {
+        if (!self::isPageArchive($archive)) return false;
+
+        if (!isset($archive->cid)) return false;
+        $cid = (int) $archive->cid;
+        if ($cid <= 0) return false;
+
+        $matched = false;
+
+        $bound = (int) YouQuan_Config::int('page_cid', 0);
+        if ($bound > 0 && $cid === $bound) {
+            $matched = true;
+        } else {
+            $slug = trim((string) YouQuan_Config::get('page_slug', 'youquan'), '/');
+            if ($slug !== '' && isset($archive->slug) && (string) $archive->slug === $slug) {
+                $matched = true;
+            }
+        }
+
+        if (!$matched) return false;
+
+        // 只有确定会接管渲染时才清空正文，主题不支持时保留短代码兜底，页面不会变空
+        return YouQuan_Render::themeDirFor($archive) !== '';
     }
 
     /**

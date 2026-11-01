@@ -532,6 +532,15 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             yq_go(array('tab' => 'feeds'));
             break;
 
+        case 'reregister_hooks':
+            if (YouQuan_Plugin::reregisterHooks()) {
+                yq_flash('钩子已重新写入，前台现在应该已生效（如仍无效请刷新页面缓存）');
+            } else {
+                yq_flash('写入失败，请确认数据库可写；也可以到「控制台 → 插件」把有圈停用再启用一次', 'error');
+            }
+            yq_go(array('tab' => 'settings'));
+            break;
+
         case 'repair_page':
             $page = YouQuan_Feed::ensurePage();
             if ($page) {
@@ -680,6 +689,7 @@ if (!$currentPage && !empty($config['page_slug'])) {
 }
 $currentPageUrl = $currentPage ? YouQuan_Feed::pageUrl($currentPage) : '';
 $shortLink = YouQuan_Plugin::shortLink();
+$hooksOk = YouQuan_Plugin::hooksRegistered();
 $flash = yq_take_flash();
 
 $pluginUrl = $options->pluginUrl . '/YouQuan';
@@ -693,6 +703,7 @@ $pluginUrl = $options->pluginUrl . '/YouQuan';
     <div class="body container">
         <div class="typecho-page-title">
             <h2><?php _e('有圈'); ?>
+                <span class="yq-ver" title="插件版本">v<?php echo yq_h(YouQuan_Plugin::VERSION); ?></span>
                 <button type="button" class="btn primary" data-open-modal="feed-modal" data-feed="new">添加圈友</button>
                 <button type="button" class="btn" data-open-modal="import-modal">从友链导入</button>
                 <a class="btn" href="<?php echo yq_h($shortLink); ?>" target="_blank" rel="noopener">查看前台</a>
@@ -1104,6 +1115,20 @@ $pluginUrl = $options->pluginUrl . '/YouQuan';
                                 <span class="yq-dot-warn"></span>
                                 还没有绑定有圈页面，下面一键创建。
                             </div>
+                        <?php endif; ?>
+
+                        <?php if (!$hooksOk): ?>
+                            <div class="yq-page-state is-warn">
+                                <span class="yq-dot-warn"></span>
+                                钩子未生效：前台不会接管页面，短代码也不会渲染。
+                                <form method="post" action="<?php echo yq_h(yq_url(array('tab' => 'settings'))); ?>" class="yq-inline-form">
+                                    <input type="hidden" name="_" value="<?php echo yq_h(yq_token()); ?>">
+                                    <input type="hidden" name="action" value="reregister_hooks">
+                                    <button class="btn btn-s primary" type="submit" title="把钩子重新写入 options.plugins">修复钩子</button>
+                                </form>
+                            </div>
+                            <p class="yq-tip">Typecho 只在启用插件的那一刻记录钩子，覆盖升级文件不会自动补上。
+                                点「修复钩子」即可，也可以到「控制台 → 插件」把有圈停用再启用一次。</p>
                         <?php endif; ?>
 
                         <div class="yq-links">
