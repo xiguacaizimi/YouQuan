@@ -15,18 +15,31 @@ require_once __DIR__ . '/Render.php';
  * @author xiguacaizimi
  * @author_email xiguacaizimi@163.com
  * @link https://www.xiguacaizimi.top
- * @version 1.3.1
+ * @version 1.3.2
  * @since 1.2.0
  */
 class YouQuan_Plugin implements Typecho_Plugin_Interface
 {
-    const VERSION = '1.3.1';
+    const VERSION = '1.3.2';
 
     /** @var int 正在由本插件接管渲染的页面 cid（0 表示未接管） */
     private static $ownPageCid = 0;
 
     /** @var bool 钩子是否已注册，避免重复注册 */
     private static $booted = false;
+
+    /**
+     * 本次请求已渲染过博友圈正文的归档（spl_object_id => true）。
+     *
+     * 防止过滤器链里同一个回调被排两次时把博友圈输出两遍。
+     * 按归档对象区分，不会影响同一次请求里的其它页面。
+     *
+     * @var array
+     */
+    private static $shortcodeDone = array();
+
+    /** @var bool 本次请求是否已经尝试过页面接管 */
+    private static $takeoverTried = false;
 
     /**
      * 启用插件。
@@ -225,8 +238,12 @@ class YouQuan_Plugin implements Typecho_Plugin_Interface
         Typecho_Plugin::factory('Widget_Abstract_Contents')->contentEx = array('YouQuan_Plugin', 'parseContent');
 
         // 独立页面接管：有圈页面不写短代码也能直接显示（对齐图库插件的做法）
-        // 两种写法在 Typecho 内部会归一化成同一个 handle，这里保留双写以兼容 1.1
-        Typecho_Plugin::factory('Widget\Archive')->beforeRender = array('YouQuan_Plugin', 'beforeRender');
+        //
+        // 这里只写一种写法：Typecho 1.2+ 内部会把类名归一化（反斜杠转下划线），
+        // 'Widget\Archive' 与 'Widget_Archive' 归一化后是同一个 handle。
+        // 两处都写会让同一个回调注册两次 —— beforeRender 白跑一遍，
+        // activated 记录里也会多出一份，停用时被按内容比对整份摘掉。
+        // 只写下划线形式，1.1（无归一化）与 1.2 / 1.3 都能匹配。
         Typecho_Plugin::factory('Widget_Archive')->beforeRender = array('YouQuan_Plugin', 'beforeRender');
 
         // 短链接：/youquan → 有圈页面
@@ -397,19 +414,19 @@ class YouQuan_Plugin implements Typecho_Plugin_Interface
      */
     public static function hooksRegistered()
     {
-        try {
-            $export = Typecho_Plugin::export();
-        } catch (Exception $e) {
-            return false;
-        } catch (Throwable $e) {
-            return false;
-        }
+        // 必须查数据库，不能只看内存：
+        // 插件文件被加载时 boot() 会把钩子注册进内存，只看内存会一直误判成「已注册」，
+        // 于是数据库里其实早就丢了钩子也检测不出来。
+        $plugins = YouQuan_Config::readOptionArray('plugins');
+        if (empty($plugins['handles']) || !is_array($plugins['handles'])) return false;
 
-        if (!isset($export['handles']) || !is_array($export['handles'])) return false;
-
-        $need = array('Widget_Archive:beforeRender', 'Widget_Abstract_Contents:contentEx');
+        $need = array(
+            'Widget_Archive:beforeRender',
+            'Widget_Abstract_Contents:contentEx',
+            'index.php:begin',
+        );
         foreach ($need as $key) {
-            if (empty($export['handles'][$key])) return false;
+            if (empty($plugins['handles'][$key])) return false;
         }
 
         return true;
@@ -431,7 +448,13 @@ class YouQuan_Plugin implements Typecho_Plugin_Interface
 
             if (!method_exists('Typecho_Plugin', 'export')) return false;
 
-            $export = Typecho_Plugin::export();
+            // 基底必须用数据库里的值：内存里的 export() 未必完整
+            // （有些上下文根本没跑过 Plugin::init()），直接拿它写回会抹掉
+            // 其它插件的启用记录，让它们变成「未启用」。
+            $export = YouQuan_Config::readOptionArray('plugins');
+            if (!is_array($export) || !$export) {
+                $export = Typecho_Plugin::export();
+            }
             if (!isset($export['handles']) || !is_array($export['handles'])) $export['handles'] = array();
             if (!isset($export['activated']) || !is_array($export['activated'])) $export['activated'] = array();
 
@@ -451,6 +474,35 @@ class YouQuan_Plugin implements Typecho_Plugin_Interface
             }
 
             $export['activated']['YouQuan'] = array('handles' => $ours);
+
+            // 清理「连坐」：Typecho 的 activated 记录来自启用那一刻的临时句柄快照，
+            // 若那次请求里也加载了本插件的文件，我们的回调会被记到别的插件名下；
+            // 之后那个插件被停用时，会按回调内容把我们的钩子一起摘掉，
+            // 结果就是「插件显示已启用，前台却完全没反应」。
+            // 这里把不属于它们的回调从记录里剔除，根除这条隐患。
+            foreach ($export['activated'] as $name => $act) {
+                if ($name === 'YouQuan') continue;
+                if (!isset($act['handles']) || !is_array($act['handles'])) continue;
+
+                foreach ($act['handles'] as $component => $callbacks) {
+                    if (!is_array($callbacks)) continue;
+
+                    // 只剔除属于我们的那几项，别人的回调必须原样保留
+                    $kept = array();
+                    foreach ($callbacks as $cb) {
+                        if (is_array($cb) && isset($cb[0]) && $cb[0] === 'YouQuan_Plugin') continue;
+                        $kept[] = $cb;
+                    }
+
+                    if (count($kept) === count($callbacks)) continue;
+
+                    if ($kept) {
+                        $export['activated'][$name]['handles'][$component] = $kept;
+                    } else {
+                        unset($export['activated'][$name]['handles'][$component]);
+                    }
+                }
+            }
 
             $db = Typecho_Db::get();
             $name = 'plugins';
@@ -478,6 +530,33 @@ class YouQuan_Plugin implements Typecho_Plugin_Interface
     }
 
     /**
+     * 自动自愈：钩子或后台菜单缺失时自动修好。
+     *
+     * 后台打开「有圈」面板时调用一次 —— 用户不必记得手动点「修复钩子」。
+     * 已经在正常状态时不会写库。
+     *
+     * @return bool 是否发生了修复
+     */
+    public static function autoRepair()
+    {
+        $needHooks = !self::hooksRegistered();
+        $needPanel = !self::panelRegistered();
+        if (!$needHooks && !$needPanel) return false;
+
+        $fixed = false;
+
+        if ($needHooks) {
+            if (self::reregisterHooks()) $fixed = true;
+        }
+
+        if ($needPanel) {
+            if (self::ensurePanel()) $fixed = true;
+        }
+
+        return $fixed;
+    }
+
+    /**
      * 独立页面渲染接管。
      *
      * 命中有圈页面时用主题自己的页头 / 左栏 / 导航 / 页脚包一层，
@@ -490,6 +569,9 @@ class YouQuan_Plugin implements Typecho_Plugin_Interface
     public static function beforeRender($archive)
     {
         if (!is_object($archive)) return;
+
+        if (self::$takeoverTried) return;
+        self::$takeoverTried = true;
 
         if (!self::isPageArchive($archive)) return;
 
@@ -539,6 +621,16 @@ class YouQuan_Plugin implements Typecho_Plugin_Interface
         if (self::isHostArchive($archive)) {
             return '';
         }
+
+        // 同一次请求里 contentEx 可能被调用多次（有的插件会在两个 handle 上注册同一个组件，
+        // 归一化后其实是同一个组件，回调就会排两次）。渲染两遍会把博友圈输出两次，
+        // 这里按归档的 cid + 类型去重（不能用 spl_object_id，对象销毁后 id 会被复用）。
+        $doneKey = 'x';
+        if (is_object($archive) && isset($archive->cid)) {
+            $doneKey = (int) $archive->cid . ':' . (isset($archive->type) ? (string) $archive->type : '');
+        }
+        if (isset(self::$shortcodeDone[$doneKey])) return '';
+        self::$shortcodeDone[$doneKey] = true;
 
         // Markdown 会把独占一行的短代码包成 <p><code>[youquan]</code></p>，
         // 先剥掉这层包裹，避免卡片被塞进 code/p 里导致排版错乱。

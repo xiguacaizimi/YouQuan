@@ -697,6 +697,9 @@ if (!$currentPage && !empty($config['page_slug'])) {
 }
 $currentPageUrl = $currentPage ? YouQuan_Feed::pageUrl($currentPage) : '';
 $shortLink = YouQuan_Plugin::shortLink();
+// 打开面板时自动自愈：钩子或后台菜单缺失就顺手修好，
+// 用户不必记得手动点「修复钩子」。
+YouQuan_Plugin::autoRepair();
 $hooksOk = YouQuan_Plugin::hooksRegistered();
 $flash = yq_take_flash();
 
